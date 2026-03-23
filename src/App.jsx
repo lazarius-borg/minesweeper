@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Bomb, Clock, RotateCcw, Trophy, Settings, Flag } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Bomb, Clock, RotateCcw, Trophy, Settings, Flag, MousePointer2 } from 'lucide-react';
 
 const LEVELS = {
   beginner: { name: 'Beginner', w: 8, h: 8, m: 10 },
@@ -46,7 +46,6 @@ const playStartTune = () => {
       osc.start(t + start);
       osc.stop(t + start + duration);
     };
-    // 4-note arpeggio sequence taking approx 2 seconds
     playNote(523.25, 0.0, 0.4); // C5
     playNote(659.25, 0.3, 0.4); // E5
     playNote(783.99, 0.6, 0.4); // G5
@@ -60,14 +59,10 @@ const playExplosion = () => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'square';
-
-    // Quick frequency sweep down to simulate a "thud" or explosion
     osc.frequency.setValueAtTime(150, ctx.currentTime);
     osc.frequency.exponentialRampToValueAtTime(1, ctx.currentTime + 0.3);
-
     gain.gain.setValueAtTime(0.3, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
-
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(ctx.currentTime);
@@ -78,67 +73,23 @@ const playExplosion = () => {
 export default function App() {
   const [level, setLevel] = useState('beginner');
   const [board, setBoard] = useState([]);
-  const [status, setStatus] = useState('idle'); // idle, playing, won, lost
+  const [status, setStatus] = useState('idle'); // idle, playing, won, lost, animating
   const [time, setTime] = useState(0);
   const [flagsCount, setFlagsCount] = useState(0);
   const [history, setHistory] = useState({ beginner: null, intermediate: null, expert: null });
   const [showOverlay, setShowOverlay] = useState(false);
+  const [interactionMode, setInteractionMode] = useState('dig'); // 'dig' or 'flag'
+  const explosionTimeouts = useRef([]);
 
   const config = LEVELS[level];
 
-  // PWA Configuration & History Initialization
   useEffect(() => {
-    // Load History
     try {
       const savedHistory = localStorage.getItem('minesweeper_history');
       if (savedHistory) setHistory(JSON.parse(savedHistory));
     } catch (e) {
       console.warn("Could not load history", e);
     }
-
-    // Dynamic PWA Manifest setup (to remain strictly single-file)
-    const manifest = {
-      name: "Minesweeper PWA",
-      short_name: "Minesweeper",
-      start_url: ".",
-      display: "standalone",
-      background_color: "#1f2937",
-      theme_color: "#3b82f6",
-      icons: [{
-        src: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48dGV4dCB5PSIuOWVtIiBmb250LXNpemU9IjkwIj7💣PC90ZXh0Pjwvc3ZnPg==",
-        sizes: "192x192",
-        type: "image/svg+xml"
-      }]
-    };
-    const manifestBlob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
-    const manifestUrl = URL.createObjectURL(manifestBlob);
-    const link = document.createElement('link');
-    link.rel = 'manifest';
-    link.href = manifestUrl;
-    document.head.appendChild(link);
-
-    // Dynamic Service Worker setup for offline capability
-    if ('serviceWorker' in navigator) {
-      const swCode = `
-        const CACHE_NAME = 'minesweeper-cache-v1';
-        self.addEventListener('install', event => self.skipWaiting());
-        self.addEventListener('activate', event => event.waitUntil(clients.claim()));
-        self.addEventListener('fetch', event => {
-          event.respondWith(
-            fetch(event.request).then(response => {
-              const responseClone = response.clone();
-              caches.open(CACHE_NAME).then(cache => cache.put(event.request, responseClone));
-              return response;
-            }).catch(() => caches.match(event.request))
-          );
-        });
-      `;
-      const swBlob = new Blob([swCode], { type: 'application/javascript' });
-      const swUrl = URL.createObjectURL(swBlob);
-      navigator.serviceWorker.register(swUrl).catch(() => { });
-    }
-
-    return () => URL.revokeObjectURL(manifestUrl);
   }, []);
 
   // Timer
@@ -154,6 +105,9 @@ export default function App() {
 
   // Board Initialization
   const initBoard = useCallback(() => {
+    explosionTimeouts.current.forEach(clearTimeout);
+    explosionTimeouts.current = [];
+
     const newBoard = Array.from({ length: config.h }, (_, y) =>
       Array.from({ length: config.w }, (_, x) => ({
         x, y,
@@ -180,7 +134,6 @@ export default function App() {
       const rx = Math.floor(Math.random() * config.w);
       const ry = Math.floor(Math.random() * config.h);
 
-      // Ensure first click and its direct neighbors are safe
       const isFirstClickArea = Math.abs(rx - firstX) <= 1 && Math.abs(ry - firstY) <= 1;
 
       if (!currentBoard[ry][rx].isMine && !isFirstClickArea) {
@@ -248,14 +201,12 @@ export default function App() {
     setStatus('animating');
     playExplosion();
 
-    // Ensure the hit mine is revealed first
     const newBoard = [...currentBoard.map(row => [...row.map(cell => ({ ...cell }))])];
     if (hitMine) {
       newBoard[hitMine.y][hitMine.x].isRevealed = true;
     }
     setBoard(newBoard);
 
-    // Gather remaining mines
     const otherMines = [];
     newBoard.forEach(row => row.forEach(cell => {
       if (cell.isMine && (!hitMine || cell.x !== hitMine.x || cell.y !== hitMine.y) && !cell.isFlagged && !cell.isRevealed) {
@@ -263,7 +214,6 @@ export default function App() {
       }
     }));
 
-    // Shuffle for random explosion sequence
     for (let i = otherMines.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [otherMines[i], otherMines[j]] = [otherMines[j], otherMines[i]];
@@ -280,7 +230,8 @@ export default function App() {
         });
         playExplosion();
         index++;
-        setTimeout(animateExplosions, 80 + Math.random() * 50); // Small timing variation for realism
+        const tid = setTimeout(animateExplosions, 80 + Math.random() * 50);
+        explosionTimeouts.current.push(tid);
       } else {
         setStatus('lost');
         setShowOverlay(true);
@@ -288,12 +239,14 @@ export default function App() {
     };
 
     if (otherMines.length > 0) {
-      setTimeout(animateExplosions, 400); // Slight pause before chain reaction
+      const tid = setTimeout(animateExplosions, 400);
+      explosionTimeouts.current.push(tid);
     } else {
-      setTimeout(() => {
+      const tid = setTimeout(() => {
         setStatus('lost');
         setShowOverlay(true);
       }, 500);
+      explosionTimeouts.current.push(tid);
     }
   };
 
@@ -318,7 +271,9 @@ export default function App() {
         setHistory(newHistory);
         try {
           localStorage.setItem('minesweeper_history', JSON.stringify(newHistory));
-        } catch (e) { }
+        } catch (e) {
+          console.warn("Could not save history", e);
+        }
       }
     }
   };
@@ -352,7 +307,6 @@ export default function App() {
     const cell = board[y][x];
 
     if (cell.isRevealed) {
-      // Logic for "Chording" (Revealing neighbors when flags match number)
       if (cell.neighborMines > 0) {
         let flagCount = 0;
         const neighborsToReveal = [];
@@ -386,7 +340,7 @@ export default function App() {
   };
 
   const handleClick = (e, x, y) => {
-    if (e.ctrlKey) {
+    if (e.ctrlKey || interactionMode === 'flag') {
       handleRightClick(e, x, y);
     } else {
       revealCell(x, y);
@@ -410,20 +364,39 @@ export default function App() {
           Minesweeper
         </h1>
 
-        {/* Difficulty Selector */}
-        <div className="flex bg-white dark:bg-gray-800 p-1 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700">
-          {Object.keys(LEVELS).map((lvl) => (
+        {/* Controls Row */}
+        <div className="flex flex-col md:flex-row gap-4 items-center">
+          {/* Difficulty Selector */}
+          <div className="flex bg-white dark:bg-gray-800 p-1 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700">
+            {Object.keys(LEVELS).map((lvl) => (
+              <button
+                key={lvl}
+                onClick={() => setLevel(lvl)}
+                className={`px-6 py-2 rounded-lg font-semibold text-sm transition-all ${level === lvl
+                    ? 'bg-blue-500 text-white shadow-md'
+                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  }`}
+              >
+                {LEVELS[lvl].name}
+              </button>
+            ))}
+          </div>
+
+          {/* Touch Mode Controller */}
+          <div className="flex bg-white dark:bg-gray-800 p-1 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700">
             <button
-              key={lvl}
-              onClick={() => setLevel(lvl)}
-              className={`px-6 py-2 rounded-lg font-semibold text-sm transition-all ${level === lvl
-                  ? 'bg-blue-500 text-white shadow-md'
-                  : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'
-                }`}
+              onClick={() => setInteractionMode('dig')}
+              className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all flex items-center gap-2 ${interactionMode === 'dig' ? 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 shadow-inner' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
             >
-              {LEVELS[lvl].name}
+              <MousePointer2 className="w-4 h-4" /> Dig
             </button>
-          ))}
+            <button
+              onClick={() => setInteractionMode('flag')}
+              className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all flex items-center gap-2 ${interactionMode === 'flag' ? 'bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 shadow-inner' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+            >
+              <Flag className="w-4 h-4" /> Flag
+            </button>
+          </div>
         </div>
       </div>
 
@@ -441,7 +414,7 @@ export default function App() {
             onClick={initBoard}
             className="px-6 py-2 bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-lg transition-transform active:scale-95 shadow-sm border border-gray-300 dark:border-gray-600 text-xl font-bold"
           >
-            {status === 'won' ? '😎' : status === 'lost' ? '😵' : '😀'}
+            {status === 'won' ? '😎' : (status === 'lost' || status === 'animating') ? '😵' : '😀'}
           </button>
 
           <div className="flex items-center gap-2 text-2xl font-mono font-bold text-red-500 bg-black px-4 py-2 rounded-lg shadow-inner min-w-[100px] justify-center">
@@ -451,7 +424,7 @@ export default function App() {
         </div>
 
         {/* Board */}
-        <div className="overflow-x-auto overflow-y-hidden max-w-[90vw] touch-pan-x touch-pan-y rounded-lg border-4 border-gray-300 dark:border-gray-600">
+        <div className="overflow-x-auto overflow-y-hidden max-w-[90vw] touch-pan-x touch-pan-y rounded-lg border-4 border-gray-300 dark:border-gray-600 w-fit mx-auto">
           <div
             className="grid select-none"
             style={{
@@ -504,7 +477,7 @@ export default function App() {
       {/* Game Over Modal */}
       {showOverlay && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-2xl max-w-sm w-full mx-4 flex flex-col items-center text-center scale-in-center">
+          <div className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-2xl max-w-sm w-full mx-4 flex flex-col items-center text-center scale-in-center border border-gray-200 dark:border-gray-700">
             <div className="text-6xl mb-4">
               {status === 'won' ? '🎉' : '💥'}
             </div>
@@ -526,13 +499,21 @@ export default function App() {
               </div>
             </div>
 
-            <button
-              onClick={initBoard}
-              className="w-full flex items-center justify-center gap-2 bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-xl transition-colors"
-            >
-              <RotateCcw className="w-5 h-5" />
-              Play Again
-            </button>
+            <div className="flex gap-3 w-full">
+              <button
+                onClick={() => setShowOverlay(false)}
+                className="flex-1 py-3 px-4 bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 font-semibold rounded-xl transition-colors text-gray-800 dark:text-gray-200"
+              >
+                View Board
+              </button>
+              <button
+                onClick={initBoard}
+                className="flex-1 flex items-center justify-center gap-2 bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-4 rounded-xl transition-colors"
+              >
+                <RotateCcw className="w-5 h-5" />
+                Play Again
+              </button>
+            </div>
           </div>
         </div>
       )}
